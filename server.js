@@ -1,10 +1,15 @@
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const WebSocket = require('ws');
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const WebSocket = require("ws");
 
 const PORT = process.env.PORT || 3000;
-const GAME_FILE = path.join(__dirname, '3D_Silah_Savasi_Seviye_250XP_Silahlar_Boss.html');
+
+const GAME_FILE = path.join(
+  __dirname,
+  "3D_Silah_Savasi_Seviye_250XP_Silahlar_Boss.html"
+);
+
 const rooms = new Map();
 
 function send(ws, data) {
@@ -13,8 +18,8 @@ function send(ws, data) {
   }
 }
 
-function getState(room) {
-  return Array.from(room.values()).map(p => ({
+function players(room) {
+  return Array.from(room.values()).map((p) => ({
     id: p.id,
     name: p.name,
     x: p.x,
@@ -27,23 +32,28 @@ function getState(room) {
   }));
 }
 
-function broadcast(room, data, except) {
+function broadcast(room, data, except = null) {
   for (const p of room.values()) {
-    if (p.ws !== except) send(p.ws, data);
+    if (p.ws !== except) {
+      send(p.ws, data);
+    }
   }
 }
 
 const server = http.createServer((req, res) => {
-  if (req.url === '/' || req.url === '/index.html') {
+  if (req.url === "/" || req.url === "/index.html") {
     fs.readFile(GAME_FILE, (err, data) => {
       if (err) {
-        res.writeHead(500);
-        res.end('Oyun dosyasi bulunamadi.');
+        res.writeHead(500, {
+          "Content-Type": "text/plain; charset=utf-8"
+        });
+
+        res.end("Oyun HTML dosyasi bulunamadi.");
         return;
       }
 
       res.writeHead(200, {
-        'Content-Type': 'text/html; charset=utf-8'
+        "Content-Type": "text/html; charset=utf-8"
       });
 
       res.end(data);
@@ -53,18 +63,18 @@ const server = http.createServer((req, res) => {
   }
 
   res.writeHead(200, {
-    'Content-Type': 'text/plain; charset=utf-8'
+    "Content-Type": "text/plain; charset=utf-8"
   });
 
-  res.end('Silah Oyunu Multiplayer Beta Server');
+  res.end("Silah Oyunu Multiplayer Beta Server");
 });
 
 const wss = new WebSocket.Server({ server });
 
-wss.on('connection', ws => {
+wss.on("connection", (ws) => {
   let player = null;
 
-  ws.on('message', raw => {
+  ws.on("message", (raw) => {
     let msg;
 
     try {
@@ -73,10 +83,10 @@ wss.on('connection', ws => {
       return;
     }
 
-    if (msg.type === 'join') {
-      const roomName = String(msg.room || 'arena')
-        .replace(/[^a-zA-Z0-9_-]/g, '')
-        .slice(0, 20) || 'arena';
+    if (msg.type === "join") {
+      const roomName = String(msg.room || "arena")
+        .replace(/[^a-zA-Z0-9_-]/g, "")
+        .slice(0, 20) || "arena";
 
       let room = rooms.get(roomName);
 
@@ -87,15 +97,15 @@ wss.on('connection', ws => {
 
       if (room.size >= 8) {
         send(ws, {
-          type: 'error',
-          message: 'Oda dolu.'
+          type: "error",
+          message: "Oda dolu."
         });
         return;
       }
 
       player = {
         id: Math.random().toString(36).slice(2, 10),
-        name: String(msg.name || 'Oyuncu').slice(0, 16),
+        name: String(msg.name || "Oyuncu").slice(0, 16),
         room: roomName,
         ws: ws,
         x: 0,
@@ -110,14 +120,14 @@ wss.on('connection', ws => {
       room.set(player.id, player);
 
       send(ws, {
-        type: 'welcome',
+        type: "welcome",
         id: player.id,
         room: roomName
       });
 
       broadcast(room, {
-        type: 'state',
-        players: getState(room)
+        type: "state",
+        players: players(room)
       });
 
       return;
@@ -126,9 +136,10 @@ wss.on('connection', ws => {
     if (!player) return;
 
     const room = rooms.get(player.room);
+
     if (!room) return;
 
-    if (msg.type === 'state') {
+    if (msg.type === "state") {
       player.x = Number(msg.x) || 0;
       player.y = Number(msg.y) || 0;
       player.z = Number(msg.z) || 0;
@@ -138,22 +149,26 @@ wss.on('connection', ws => {
       return;
     }
 
-    if (msg.type === 'shot') {
-      broadcast(room, {
-        type: 'shot',
-        id: player.id,
-        x: Number(msg.x) || 0,
-        y: Number(msg.y) || 0,
-        z: Number(msg.z) || 0,
-        tx: Number(msg.tx) || 0,
-        ty: Number(msg.ty) || 0,
-        tz: Number(msg.tz) || 0
-      }, ws);
+    if (msg.type === "shot") {
+      broadcast(
+        room,
+        {
+          type: "shot",
+          id: player.id,
+          x: Number(msg.x) || 0,
+          y: Number(msg.y) || 0,
+          z: Number(msg.z) || 0,
+          tx: Number(msg.tx) || 0,
+          ty: Number(msg.ty) || 0,
+          tz: Number(msg.tz) || 0
+        },
+        ws
+      );
 
       return;
     }
 
-    if (msg.type === 'hit') {
+    if (msg.type === "hit") {
       const target = room.get(String(msg.target));
 
       if (!target || target === player) return;
@@ -169,7 +184,7 @@ wss.on('connection', ws => {
       );
 
       send(target.ws, {
-        type: 'hit',
+        type: "hit",
         target: target.id,
         damage: damage
       });
@@ -181,7 +196,7 @@ wss.on('connection', ws => {
         target.z = (Math.random() - 0.5) * 30;
 
         broadcast(room, {
-          type: 'kill',
+          type: "kill",
           killer: player.id,
           victim: target.id,
           points: 100
@@ -190,10 +205,11 @@ wss.on('connection', ws => {
     }
   });
 
-  ws.on('close', () => {
+  ws.on("close", () => {
     if (!player) return;
 
     const room = rooms.get(player.room);
+
     if (!room) return;
 
     room.delete(player.id);
@@ -202,8 +218,8 @@ wss.on('connection', ws => {
       rooms.delete(player.room);
     } else {
       broadcast(room, {
-        type: 'state',
-        players: getState(room)
+        type: "state",
+        players: players(room)
       });
     }
   });
@@ -212,12 +228,12 @@ wss.on('connection', ws => {
 setInterval(() => {
   for (const room of rooms.values()) {
     broadcast(room, {
-      type: 'state',
-      players: getState(room)
+      type: "state",
+      players: players(room)
     });
   }
 }, 100);
 
 server.listen(PORT, () => {
-  console.log('Server running on port ' + PORT);
+  console.log("Silah Oyunu Multiplayer Server - Port " + PORT);
 });
