@@ -1,17 +1,30 @@
-const http = require("http");
-const fs = require("fs");
-const path = require("path");
-const WebSocket = require("ws");
+const WebSocket = require('ws');
+const http = require('http');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-const MAX_PLAYERS = 8;
-
-const GAME_FILE = path.join(
-  __dirname,
-  "3D_Silah_Savasi_Seviye_250XP_Silahlar_Boss.html"
-);
+const MAX_PLAYERS_PER_ROOM = 8;
+const TICK_MS = 50;
 
 const rooms = new Map();
+
+function id() {
+  return crypto.randomBytes(4).toString('hex');
+}
+
+function cleanName(v) {
+  return String(v || 'Oyuncu')
+    .replace(/[^a-zA-Z0-9_ğüşöçıİĞÜŞÖÇ -]/g, '')
+    .slice(0, 16) || 'Oyuncu';
+}
+
+function cleanRoom(v) {
+  return String(v || 'arena')
+    .replace(/[^a-zA-Z0-9_-]/g, '')
+    .slice(0, 16) || 'arena';
+}
 
 function send(ws, data) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -20,210 +33,52 @@ function send(ws, data) {
 }
 
 function broadcast(room, data, except = null) {
-  for (const player of room.players.values()) {
+  for (const player of room.values()) {
     if (player.ws !== except) {
       send(player.ws, data);
     }
   }
 }
 
-function publicPlayer(player) {
-  return {
-    id: player.id,
-    name: player.name,
-    x: player.x,
-    y: player.y,
-    z: player.z,
-    yaw: player.yaw,
-    pitch: player.pitch,
-    hp: player.hp
-  };
+function roomPlayers(room) {
+  return [...room.values()].map(p => ({
+    id: p.id,
+    name: p.name,
+    x: p.x,
+    y: p.y,
+    z: p.z,
+    yaw: p.yaw,
+    pitch: p.pitch,
+    hp: p.hp,
+    weapon: p.weapon,
+    crouching: p.crouching
+  }));
 }
 
-function getRoomPlayers(room) {
-  return Array.from(room.players.values()).map(publicPlayer);
-}
-
-function createRoom(name) {
-  const room = {
-    name,
-    players: new Map(),
-    zombies: new Map(),
-    wave: 1,
-    nextZombieId: 1,
-    lastSpawn: 0
-  };
-
-  rooms.set(name, room);
-  return room;
-}
-
-function spawnZombie(room, isBoss = false) {
-  const id = "zombie_" + room.nextZombieId++;
-
-  const angle = Math.random() * Math.PI * 2;
-  const distance = 20 + Math.random() * 20;
-
-  const zombie = {
-    id,
-    type: isBoss ? "boss" : "zombie",
-    x: Math.cos(angle) * distance,
-    y: 0,
-    z: Math.sin(angle) * distance,
-
-    hp: isBoss
-      ? 1000 + room.wave * 250
-      : 120 + room.wave * 30,
-
-    maxHp: isBoss
-      ? 1000 + room.wave * 250
-      : 120 + room.wave * 30,
-
-    speed: isBoss
-      ? 1.2 + room.wave * 0.03
-      : 2.2 + room.wave * 0.08,
-
-    damage: isBoss
-      ? 25 + room.wave * 2
-      : 10 + room.wave,
-
-    attackCooldown: 0
-  };
-
-  room.zombies.set(id, zombie);
-
-  return zombie;
-}
-
-function spawnWave(room) {
-  const amount = Math.min(50, 5 + room.wave * 3);
-
-  for (let i = 0; i < amount; i++) {
-    spawnZombie(room, false);
-  }
-
-  if (room.wave % 5 === 0) {
-    spawnZombie(room, true);
-  }
-
-  broadcast(room, {
-    type: "wave",
-    wave: room.wave,
-    zombieCount: room.zombies.size
-  });
-}
-
-function nearestPlayer(room, zombie) {
-  let best = null;
-  let bestDistance = Infinity;
-
-  for (const player of room.players.values()) {
-    const dx = player.x - zombie.x;
-    const dz = player.z - zombie.z;
-    const distance = Math.sqrt(dx * dx + dz * dz);
-
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      best = player;
-    }
-  }
-
-  return best;
-}
-
-function updateZombies(room, delta) {
-  for (const zombie of room.zombies.values()) {
-    const target = nearestPlayer(room, zombie);
-
-    if (!target) continue;
-
-    const dx = target.x - zombie.x;
-    const dz = target.z - zombie.z;
-    const distance = Math.sqrt(dx * dx + dz * dz);
-
-    if (distance > 1.8) {
-      zombie.x += (dx / Math.max(distance, 0.001)) *
-        zombie.speed * delta;
-
-      zombie.z += (dz / Math.max(distance, 0.001)) *
-        zombie.speed * delta;
-    } else {
-      zombie.attackCooldown -= delta;
-
-      if (zombie.attackCooldown <= 0) {
-        zombie.attackCooldown = 1;
-
-        target.hp = Math.max(
-          0,
-          target.hp - zombie.damage
-        );
-
-        send(target.ws, {
-          type: "zombieAttack",
-          zombieId: zombie.id,
-          damage: zombie.damage,
-          hp: target.hp
-        });
-
-        if (target.hp <= 0) {
-          target.hp = 100;
-
-          target.x = 0;
-          target.y = 1.6;
-          target.z = 0;
-
-          send(target.ws, {
-            type: "respawn",
-            hp: 100,
-            x: 0,
-            y: 1.6,
-            z: 0
-          });
-        }
-      }
-    }
-  }
-}
-
-function broadcastZombieState(room) {
-  broadcast(room, {
-    type: "zombies",
-    wave: room.wave,
-    zombies: Array.from(room.zombies.values()).map(z => ({
-      id: z.id,
-      type: z.type,
-      x: z.x,
-      y: z.y,
-      z: z.z,
-      hp: z.hp,
-      maxHp: z.maxHp
-    }))
-  });
-}
+const GAME_FILE = path.join(
+  __dirname,
+  '3D_Silah_Savasi_Seviye_250XP_Silahlar_Boss.html'
+);
 
 const server = http.createServer((req, res) => {
-  const cleanUrl = req.url.split("?")[0];
 
-  if (
-    cleanUrl === "/" ||
-    cleanUrl === "/index.html"
-  ) {
+  if (req.url === '/' || req.url === '/index.html') {
+
     fs.readFile(GAME_FILE, (err, data) => {
+
       if (err) {
         res.writeHead(500, {
-          "Content-Type": "text/plain; charset=utf-8"
+          'Content-Type': 'text/plain; charset=utf-8'
         });
 
-        res.end(
-          "Oyun dosyasi bulunamadi: " +
-          GAME_FILE
+        return res.end(
+          'Oyun dosyasi bulunamadi.'
         );
-
-        return;
       }
 
       res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8"
+        'Content-Type': 'text/html; charset=utf-8',
+        'Cache-Control': 'no-store'
       });
 
       res.end(data);
@@ -233,11 +88,11 @@ const server = http.createServer((req, res) => {
   }
 
   res.writeHead(200, {
-    "Content-Type": "text/plain; charset=utf-8"
+    'Content-Type': 'text/plain; charset=utf-8'
   });
 
   res.end(
-    "Silah Oyunu Multiplayer Beta Server - ONLINE"
+    '3D Silah Savasi Multiplayer Beta server is running.'
   );
 });
 
@@ -245,95 +100,90 @@ const wss = new WebSocket.Server({
   server
 });
 
-wss.on("connection", ws => {
+wss.on('connection', ws => {
+
   let player = null;
 
-  ws.on("message", raw => {
-    let message;
+  ws.on('message', raw => {
+
+    let m;
 
     try {
-      message = JSON.parse(raw.toString());
+      m = JSON.parse(raw.toString());
     } catch {
       return;
     }
 
-    if (message.type === "join") {
-      const roomName =
-        String(message.room || "arena")
-          .replace(/[^a-zA-Z0-9_-]/g, "")
-          .slice(0, 20) || "arena";
+    /*
+     * ODAYA KATIL
+     */
+    if (m.type === 'join') {
+
+      if (player) return;
+
+      const roomName = cleanRoom(m.room);
 
       let room = rooms.get(roomName);
 
       if (!room) {
-        room = createRoom(roomName);
+        room = new Map();
+        rooms.set(roomName, room);
       }
 
-      if (room.players.size >= MAX_PLAYERS) {
+      if (room.size >= MAX_PLAYERS_PER_ROOM) {
+
         send(ws, {
-          type: "error",
-          message: "Oda dolu."
+          type: 'error',
+          message: 'Oda dolu (maksimum 8 oyuncu).'
         });
 
         return;
       }
 
       player = {
-        id: Math.random()
-          .toString(36)
-          .slice(2, 10),
+        id: id(),
 
-        name: String(
-          message.name || "Oyuncu"
-        ).slice(0, 16),
+        name: cleanName(m.name),
 
-        ws,
         room: roomName,
 
+        ws,
+
         x: 0,
-        y: 1.6,
-        z: 0,
+        y: 0,
+        z: 6,
 
         yaw: 0,
         pitch: 0,
 
-        hp: 100
+        hp: 100,
+
+        weapon: 0,
+
+        crouching: false
       };
 
-      room.players.set(player.id, player);
+      room.set(player.id, player);
 
       send(ws, {
-        type: "welcome",
+        type: 'welcome',
         id: player.id,
-        room: roomName,
-        maxPlayers: MAX_PLAYERS
+        room: roomName
       });
 
       send(ws, {
-        type: "players",
-        players: getRoomPlayers(room)
-      });
-
-      send(ws, {
-        type: "zombies",
-        wave: room.wave,
-        zombies: Array.from(
-          room.zombies.values()
-        )
+        type: 'state',
+        players: roomPlayers(room)
       });
 
       broadcast(
         room,
         {
-          type: "playerJoined",
-          player: publicPlayer(player)
+          type: 'state',
+          players: roomPlayers(room)
         },
         ws
       );
-
-      if (room.zombies.size === 0) {
-        spawnWave(room);
-      }
 
       return;
     }
@@ -345,23 +195,68 @@ wss.on("connection", ws => {
     if (!room) return;
 
     /*
-     * Oyuncular birbirine zarar veremez.
-     * Burada sadece oyuncunun konumu güncelleniyor.
+     * OYUNCU HAREKETİ
      */
-    if (message.type === "state") {
-      player.x = Number(message.x) || 0;
-      player.y = Number(message.y) || 0;
-      player.z = Number(message.z) || 0;
+    if (m.type === 'state') {
 
-      player.yaw = Number(message.yaw) || 0;
-      player.pitch = Number(message.pitch) || 0;
+      player.x = Number(m.x) || 0;
+
+      player.y = Math.max(
+        0,
+        Number(m.y) || 0
+      );
+
+      player.z = Number(m.z) || 0;
+
+      player.yaw =
+        Number(m.yaw) || 0;
+
+      player.pitch =
+        Number(m.pitch) || 0;
+
+      player.weapon =
+        Math.max(
+          0,
+          Math.min(
+            3,
+            Number(m.weapon) || 0
+          )
+        );
+
+      player.crouching =
+        !!m.crouching;
+
+      return;
+    }
+
+    /*
+     * ATEŞ ETME
+     *
+     * ÖNEMLİ:
+     * Oyuncular birbirine zarar veremez.
+     *
+     * Bu mesaj sadece diğer oyunculara
+     * ateş efektini göstermek içindir.
+     */
+    if (m.type === 'shot') {
+
+      const shot = {
+        type: 'shot',
+
+        id: player.id,
+
+        x: Number(m.x) || 0,
+        y: Number(m.y) || 0,
+        z: Number(m.z) || 0,
+
+        tx: Number(m.tx) || 0,
+        ty: Number(m.ty) || 0,
+        tz: Number(m.tz) || 0
+      };
 
       broadcast(
         room,
-        {
-          type: "playerState",
-          player: publicPlayer(player)
-        },
+        shot,
         ws
       );
 
@@ -369,110 +264,103 @@ wss.on("connection", ws => {
     }
 
     /*
-     * Ateş etme.
-     * Sadece zombie hedefleri kabul edilir.
+     * ESKİ PVP HIT SİSTEMİNİ KAPATTIK.
+     *
+     * Oyuncular artık birbirini öldüremez.
      */
-    if (message.type === "shootZombie") {
-      const zombie = room.zombies.get(
-        String(message.target)
-      );
+    if (m.type === 'hit') {
+      return;
+    }
 
-      if (!zombie) return;
+    /*
+     * ZOMBİYE HASAR
+     *
+     * HTML tarafı zombieHit gönderirse
+     * burada işlenebilir.
+     */
+    if (m.type === 'zombieHit') {
 
-      const damage = Math.max(
-        1,
-        Math.min(
-          500,
-          Number(message.damage) || 25
-        )
-      );
-
-      zombie.hp -= damage;
-
-      broadcast(room, {
-        type: "zombieHit",
-        zombieId: zombie.id,
-        hp: Math.max(0, zombie.hp),
-        maxHp: zombie.maxHp,
-        attacker: player.id
-      });
-
-      if (zombie.hp <= 0) {
-        room.zombies.delete(zombie.id);
-
-        broadcast(room, {
-          type: "zombieKilled",
-          zombieId: zombie.id,
-          killer: player.id,
-          xp: zombie.type === "boss" ? 500 : 50
-        });
-
-        if (room.zombies.size === 0) {
-          room.wave++;
-
-          setTimeout(() => {
-            if (room.players.size > 0) {
-              spawnWave(room);
-            }
-          }, 2500);
+      broadcast(
+        room,
+        {
+          type: 'zombieHit',
+          zombieId: m.zombieId,
+          damage: Math.max(
+            1,
+            Math.min(
+              150,
+              Number(m.damage) || 10
+            )
+          ),
+          attacker: player.id
         }
-      }
+      );
 
       return;
     }
+
   });
 
-  ws.on("close", () => {
+  /*
+   * OYUNCU ÇIKTI
+   */
+  ws.on('close', () => {
+
     if (!player) return;
 
-    const room = rooms.get(player.room);
+    const room =
+      rooms.get(player.room);
 
     if (!room) return;
 
-    room.players.delete(player.id);
+    room.delete(player.id);
 
-    broadcast(room, {
-      type: "playerLeft",
-      id: player.id
-    });
+    broadcast(
+      room,
+      {
+        type: 'state',
+        players: roomPlayers(room)
+      }
+    );
 
-    if (room.players.size === 0) {
+    if (room.size === 0) {
       rooms.delete(player.room);
     }
   });
+
 });
 
 /*
- * Server oyun döngüsü.
- * Zombiler burada hareket eder.
+ * SUNUCU DÜZENLİ OLARAK OYUNCU
+ * DURUMLARINI PAYLAŞIR.
  */
-let lastTime = Date.now();
-
 setInterval(() => {
-  const now = Date.now();
-
-  const delta = Math.min(
-    0.1,
-    (now - lastTime) / 1000
-  );
-
-  lastTime = now;
 
   for (const room of rooms.values()) {
-    updateZombies(room, delta);
-    broadcastZombieState(room);
+
+    broadcast(
+      room,
+      {
+        type: 'state',
+        players: roomPlayers(room)
+      }
+    );
+
   }
-}, 100);
+
+}, TICK_MS);
 
 /*
- * Server başlat.
+ * SERVER BAŞLAT
  */
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(
-    "Silah Oyunu Multiplayer Beta Server ONLINE"
-  );
+server.listen(
+  PORT,
+  '0.0.0.0',
+  () => {
 
-  console.log(
-    "Port: " + PORT
-  );
-});
+    console.log(
+      `Multiplayer server listening on port ${PORT}`
+    );
+
+  }
+);
